@@ -1,0 +1,93 @@
+name: PR Automation
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  approve:
+    name: Auto approve PR and enable auto-merge
+
+#    if: |
+#      github.event.action != 'closed' &&
+#      github.event.pull_request.draft == false
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Debug event values
+        env:
+          PR_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          echo "Action: $PR_ACTION"
+          echo "PR: $PR_NUMBER"
+          echo "Source branch: $SOURCE_BRANCH"
+          echo "Target branch: $TARGET_BRANCH"
+
+      - name: Approve PR
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review "$PR_URL" --approve
+
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr merge "$PR_URL" \
+            --merge \
+            --auto
+
+  sync:
+    name: Sync deployment fork
+
+    if: |
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@v4
+        with:
+          repository: test-iphun/test-deploy
+          token: ${{ secrets.BOT_TOKEN }}
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Add upstream repository
+        run: |
+          git remote add upstream https://github.com/test-iphun/test.git
+
+      - name: Synchronize target branch
+        env:
+          TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch upstream "$TARGET_BRANCH"
+          git merge --no-ff "upstream/$TARGET_BRANCH"
+          git push origin "$TARGET_BRANCH"
+
+      - name: Report successful synchronization
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          echo "PR #$PR_NUMBER was merged."
+          echo "Branch $TARGET_BRANCH was synchronized to test-iphun/test-deploy."
