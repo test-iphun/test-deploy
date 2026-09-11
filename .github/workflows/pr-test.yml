@@ -61,13 +61,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-    
+       
       - name: Checkout deployment repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: test-iphun/test-deploy
           token: ${{ secrets.BOT_TOKEN }}
