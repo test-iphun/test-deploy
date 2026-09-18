@@ -1,0 +1,48 @@
+name: Production Sync POC
+
+on:
+
+  # Every day at 21:00 Budapest local time.
+  schedule:
+    - cron: "0 21 * * *"
+      timezone: "Europe/Budapest"
+
+  # Allows us to test it manually without waiting until 21:00.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # CHANGE THESE
+  CENTRAL_REPO: test-iphun/test
+  DEPLOY_REPO: test-iphun/test-deploy
+
+jobs:
+
+  sync-prod:
+    name: Sync production branch
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Show synchronization
+        run: |
+          echo "Production synchronization starting."
+          echo ""
+          echo "$CENTRAL_REPO:prod"
+          echo "        ->"
+          echo "$DEPLOY_REPO:prod"
+
+      - name: Sync production
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          gh repo sync "$DEPLOY_REPO" \
+            --source "$CENTRAL_REPO" \
+            --branch prod
+
+      - name: Report success
+        run: |
+          echo "Production branch synchronized successfully."
