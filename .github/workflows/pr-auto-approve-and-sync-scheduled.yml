@@ -1,0 +1,162 @@
+name: PR-Automation-Scheduled
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+  # GitHub cron expressions use UTC.
+  # 19:00 UTC = 21:00 during Hungarian summer time.
+  # 20:00 UTC = 21:00 during Hungarian winter time.
+  schedule:
+    - cron: "0 19,20 * * *"
+
+  # Allows manual testing from the Actions page.
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  approve:
+    name: Auto approve PR and enable auto-merge
+
+    if: |
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.draft == false
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Debug event values
+        env:
+          PR_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          echo "Action: $PR_ACTION"
+          echo "PR: $PR_NUMBER"
+          echo "Source branch: $SOURCE_BRANCH"
+          echo "Target branch: $TARGET_BRANCH"
+
+      - name: Approve PR
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review "$PR_URL" --approve
+
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr merge "$PR_URL" \
+            --merge \
+            --auto
+
+  check-sync-time:
+    name: Check Budapest time
+
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+
+    runs-on: ubuntu-latest
+
+    outputs:
+      run-sync: ${{ steps.time.outputs.run-sync }}
+
+    steps:
+      - name: Check whether it is 21:00 in Budapest
+        id: time
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          budapest_hour="$(TZ=Europe/Budapest date +%H)"
+          echo "Current Budapest hour: $budapest_hour"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$budapest_hour" = "21" ]; then
+            echo "run-sync=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run-sync=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  sync:
+    name: Sync deployment fork
+
+    needs: check-sync-time
+
+    if: needs.check-sync-time.outputs.run-sync == 'true'
+
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: deployment-sync-test
+      cancel-in-progress: false
+
+    env:
+      TARGET_BRANCH: test
+
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@v6
+        with:
+          repository: test-iphun/test-deploy
+          token: ${{ secrets.BOT_TOKEN }}
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+
+      - name: Fetch upstream repository
+        run: |
+          git remote add upstream https://github.com/test-iphun/test.git
+          git fetch upstream "$TARGET_BRANCH"
+
+      - name: Check for unsynchronized commits
+        id: changes
+        run: |
+          missing_commits="$(
+            git rev-list \
+              --count \
+              "HEAD..upstream/$TARGET_BRANCH"
+          )"
+
+          echo "Unsynchronized upstream commits: $missing_commits"
+
+          if [ "$missing_commits" -gt 0 ]; then
+            echo "sync-required=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sync-required=false" >> "$GITHUB_OUTPUT"
+            echo "No synchronization is required."
+          fi
+
+      - name: Synchronize target branch
+        if: steps.changes.outputs.sync-required == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "github-actions[bot]@users.noreply.github.com"
+
+          git merge \
+            --no-ff \
+            "upstream/$TARGET_BRANCH" \
+            -m "Scheduled sync from test-iphun/test:$TARGET_BRANCH"
+
+          git push origin "$TARGET_BRANCH"
+
+      - name: Report successful synchronization
+        if: steps.changes.outputs.sync-required == 'true'
+        run: |
+          echo "Branch $TARGET_BRANCH was synchronized."
+          echo "Source: test-iphun/test"
+          echo "Destination: test-iphun/test-deploy"
+
+      - name: Report no changes
+        if: steps.changes.outputs.sync-required == 'false'
+        run: |
+          echo "No new commits were found."
+          echo "The deployment repository is already synchronized."
