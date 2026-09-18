@@ -1,0 +1,173 @@
+name: PR Automation POC
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+    branches:
+      - test
+      - prod
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  # CHANGE THESE TO YOUR ACTUAL FULL REPOSITORY NAMES
+  CENTRAL_REPO: test-iphun/test
+  SOURCE_REPO: test-iphun/test-fork
+  DEPLOY_REPO: test-iphun/test-deploy
+
+jobs:
+
+  #
+  # APPROVE + MERGE
+  #
+  approve-and-merge:
+    name: Validate, approve and merge
+
+    if: |
+      github.event.action != 'closed' &&
+      github.event.pull_request.draft == false
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Show PR information
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "PR:            $PR_NUMBER"
+          echo "Source repo:   $HEAD_REPO"
+          echo "Source branch: $HEAD_BRANCH"
+          echo "Target branch: $BASE_BRANCH"
+          echo "Head SHA:      $HEAD_SHA"
+
+      - name: Validate PR source
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        shell: bash
+        run: |
+          echo "Validating PR route..."
+
+          # PR must come from exactly test-fork.
+          if [[ "$HEAD_REPO" != "$SOURCE_REPO" ]]; then
+            echo "::error::PR came from unauthorized repository: $HEAD_REPO"
+            exit 1
+          fi
+
+          # Source and target branch must have the same name.
+          #
+          # Allowed:
+          # test-fork:test -> test:test
+          # test-fork:prod -> test:prod
+          #
+          # Rejected:
+          # test-fork:test -> test:prod
+          # test-fork:prod -> test:test
+          if [[ "$HEAD_BRANCH" != "$BASE_BRANCH" ]]; then
+            echo "::error::Source branch and target branch do not match."
+            exit 1
+          fi
+
+          # Only test and prod are valid.
+          case "$BASE_BRANCH" in
+            test|prod)
+              echo "Valid route:"
+              echo "$HEAD_REPO:$HEAD_BRANCH -> $CENTRAL_REPO:$BASE_BRANCH"
+              ;;
+            *)
+              echo "::error::Unsupported branch: $BASE_BRANCH"
+              exit 1
+              ;;
+          esac
+
+      - name: Approve PR
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          echo "Approving $PR_URL"
+          gh pr review "$PR_URL" --approve
+
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "Enabling auto-merge for $PR_URL"
+
+          gh pr merge "$PR_URL" \
+            --merge \
+            --auto \
+            --match-head-commit "$HEAD_SHA"
+
+
+  #
+  # IMMEDIATE TEST SYNC
+  #
+  sync-test:
+    name: Sync test-deploy test branch
+
+    if: |
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'test'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Validate merged PR
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        shell: bash
+        run: |
+          echo "Checking merged PR before synchronization..."
+
+          if [[ "$HEAD_REPO" != "$SOURCE_REPO" ]]; then
+            echo "::error::Merged PR did not come from expected repository."
+            exit 1
+          fi
+
+          if [[ "$HEAD_BRANCH" != "test" ]]; then
+            echo "::error::Expected source branch test."
+            exit 1
+          fi
+
+          if [[ "$BASE_BRANCH" != "test" ]]; then
+            echo "::error::Expected target branch test."
+            exit 1
+          fi
+
+          echo "Merged PR is valid."
+
+      - name: Sync test-deploy test
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          echo "Synchronizing:"
+          echo "$CENTRAL_REPO:test"
+          echo "        ->"
+          echo "$DEPLOY_REPO:test"
+
+          gh repo sync "$DEPLOY_REPO" \
+            --source "$CENTRAL_REPO" \
+            --branch test
+
+      - name: Report success
+        run: |
+          echo "test-deploy:test successfully synchronized."
